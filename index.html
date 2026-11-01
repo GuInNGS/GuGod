@@ -223,6 +223,11 @@
   .rep-foot .sp{color:var(--muted);font-size:12px;margin-right:auto}
   .tag{font-size:10px;padding:1px 6px;border-radius:5px;background:#1b2431;color:#9fb3d1;border:1px solid var(--line2)}
   .noscroll{overflow:hidden}
+  #tipQ,#acctQ{display:none}
+  .qbtn{width:20px;height:20px;border-radius:50%;border:1px solid var(--line2);background:#1b2431;
+    color:var(--muted);font-size:11px;line-height:1;cursor:pointer;padding:0;flex:0 0 auto;font-family:inherit}
+  .qbtn:hover{color:var(--txt)}
+  .qmore{display:none}
 
   @media (max-width:1180px){
     .view{flex-direction:column}
@@ -241,13 +246,25 @@
     .settings .pill{display:none}
     .tabs .tab{padding:5px 10px;font-size:12px}
 
-    /* 右栏拆开，按「图表 → 操作 → 账户 → 行情」重排 */
+    /* 右栏拆开，按「图表 → 行情 → 操作 → 账户」重排 */
     .view{flex-direction:column;gap:10px}
     .side{display:contents}
     .chart-card{order:1}
-    .card.ops{order:2}
-    .card.acct{order:3}
-    .card.quote{order:4}
+    .card.quote{order:2}
+    .card.ops{order:3;position:relative}
+    .card.acct{order:4}
+    .settings label{display:none}
+    .zoomer{display:none}
+    #tipQ{display:block;position:absolute;top:10px;right:10px}
+    .card.ops .tip{display:none}
+    .card.ops.show-tip .tip{display:block}
+    #acctQ{display:inline-block;margin-left:6px;vertical-align:middle}
+    .acct-fold{display:none}
+    .card.acct.show-fold .acct-fold{display:block}
+    #kvExtra{display:none}
+    .card.quote.open-extra #kvExtra{display:grid}
+    .qmore{display:block;margin-top:8px;width:100%;height:26px;font-size:11px;color:var(--muted);
+      background:transparent;border:1px dashed var(--line2);border-radius:7px;cursor:pointer;font-family:inherit}
 
     .canvas-wrap{min-height:0}
     .chart-card #chart{height:clamp(180px,34vh,360px);min-height:0}
@@ -268,8 +285,7 @@
     .card.ops .btn.act{height:52px}
     .card.ops .btn.ghost{height:36px;font-size:12px}
     .card.ops .keys{display:none}
-    .card.ops .tip{font-size:11px;line-height:1.5;display:-webkit-box;-webkit-line-clamp:2;
-      -webkit-box-orient:vertical;overflow:hidden}
+    .card.ops .tip{font-size:11px;line-height:1.5}
     .card.acct .ret-big b{font-size:26px}
   }
   @media (max-width:420px){
@@ -347,18 +363,22 @@
           <span id="qChg" class="chg">—</span>
         </div>
         <div class="kv" id="kvQuote"></div>
+        <div class="kv" id="kvExtra"></div>
+        <button id="qMore" class="qmore" type="button">技术指标 ▾</button>
       </div>
 
       <div class="card acct">
-        <div class="card-t">账户 <span id="aState" class="muted">空仓</span></div>
+        <div class="card-t">账户 <span id="aState" class="muted">空仓</span><button id="acctQ" class="qbtn" type="button" title="持仓与资金明细">▾</button></div>
         <div class="ret-big"><b id="aRet">—</b><span>本局收益</span></div>
-        <div class="acct-row"><span>持仓盈亏</span><b id="aPnl">—</b></div>
-        <div class="acct-row"><span>可用资金</span><b id="aCash">—</b></div>
-        <div class="acct-row"><span>持仓</span><b id="aPos">—</b></div>
         <div class="acct-row total"><span>总权益</span><b id="aEquity">—</b></div>
-        <div class="acct-foot">
-          <span id="aCum">累计 —</span>
-          <button id="btnReset" class="btn link" title="归档当前账户，从 10 万重新开始">启动！空中飞人！</button>
+        <div class="acct-fold">
+          <div class="acct-row"><span>持仓盈亏</span><b id="aPnl">—</b></div>
+          <div class="acct-row"><span>可用资金</span><b id="aCash">—</b></div>
+          <div class="acct-row"><span>持仓</span><b id="aPos">—</b></div>
+          <div class="acct-foot">
+            <span id="aCum">累计 —</span>
+            <button id="btnReset" class="btn link" title="归档当前账户，从 10 万重新开始">启动！空中飞人！</button>
+          </div>
         </div>
       </div>
 
@@ -367,6 +387,7 @@
         <button id="btnB" class="btn act wait">观望</button>
         <button id="btnEnd" class="btn ghost" title="立刻按当前收盘价结算，不再等阶段结束">我赌自己会输，溜了溜了</button>
         <p class="keys"><kbd>←</kbd>/<kbd>A</kbd> 买入·持有　　<kbd>→</kbd>/<kbd>D</kbd> 观望·卖出</p>
+        <button id="tipQ" class="qbtn tipq" type="button" title="规则说明">?</button>
         <p class="tip" id="tip">每天收盘后二选一：空仓「买入 / 观望」，持仓「持有 / 卖出」；成交价 = 次日开盘价，标记画在成交那天。</p>
       </div>
     </aside>
@@ -1155,21 +1176,29 @@ function renderKline(cv, view) {
   ctx.fillText('MACD', padL + 2, mT + 6);
 
   // 买卖点
+  // 买卖点：金色圆框 + 大号字母，深底金字，涨跌配色下都醒目
+  const GOLD = '#f6c453';
+  const markR = (x, cy, ch) => {
+    const r = Math.min(10, Math.max(6.5, bw * 0.72));
+    ctx.beginPath(); ctx.arc(x, cy, r, 0, Math.PI * 2);
+    ctx.fillStyle = 'rgba(10,15,24,.88)'; ctx.fill();
+    ctx.lineWidth = 1.8; ctx.strokeStyle = GOLD; ctx.stroke();
+    ctx.fillStyle = GOLD;
+    ctx.font = 'bold ' + Math.round(r * 1.35) + 'px ui-monospace, Consolas, monospace';
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillText(ch, x, cy + 0.5);
+  };
   const markB = (bi) => {
     if (bi < i0) return;                             // 已滚出视口
-    const x = xC(bi), y = clamp(yP(bars[bi][4]), pT + 16, pB - 17);
-    ctx.fillStyle = '#ff4d4f';
-    ctx.beginPath(); ctx.moveTo(x, y + 3); ctx.lineTo(x - 4, y + 9); ctx.lineTo(x + 4, y + 9); ctx.closePath(); ctx.fill();
-    ctx.font = 'bold 9px ui-monospace, monospace'; ctx.textAlign = 'center'; ctx.textBaseline = 'top';
-    ctx.fillText('B', x, y + 10);
+    const r = Math.min(10, Math.max(6.5, bw * 0.72));
+    const cy = clamp(yP(bars[bi][4]) + r + 5, pT + r + 2, pB - r - 2);   // 买点画在K线下缘外
+    markR(xC(bi), cy, 'B');
   };
   const markS = (si) => {
     if (si < i0) return;                             // 已滚出视口
-    const x = xC(si), y = clamp(yP(bars[si][3]), pT + 16, pB - 17);
-    ctx.fillStyle = '#22c55e';
-    ctx.beginPath(); ctx.moveTo(x, y - 3); ctx.lineTo(x - 4, y - 9); ctx.lineTo(x + 4, y - 9); ctx.closePath(); ctx.fill();
-    ctx.font = 'bold 9px ui-monospace, monospace'; ctx.textAlign = 'center'; ctx.textBaseline = 'bottom';
-    ctx.fillText('S', x, y - 10);
+    const r = Math.min(10, Math.max(6.5, bw * 0.72));
+    const cy = clamp(yP(bars[si][3]) - r - 5, pT + r + 2, pB - r - 2);   // 卖点画在K线上缘外
+    markR(xC(si), cy, 'S');
   };
   // 持仓中：买入当天就标 B，并画出成本线（不必等这笔卖出）
   if (pos && pos.bIdx >= 0 && pos.bIdx <= idx) {
@@ -1612,12 +1641,15 @@ function renderQuote() {
     ['MACD', fmt(ind.macd[i], 3)], ['MA5', fmt(ind.ma5[i])],
     ['MA10', fmt(ind.ma10[i])], ['MA20', fmt(ind.ma20[i])],
   ];
-  $('kvQuote').innerHTML = rows.map(([k, val]) => {
+  // 开高低收常显；量额/指标进折叠区（手机默认收起，桌面全显）
+  const kvHtml = (list) => list.map(([k, val]) => {
     let color = '';
     if (k === 'MACD' || k === 'DIF') color = cls(ind[k.toLowerCase()][i]);
     if (k === '量比(5日)' && vr != null) color = vr >= 1 ? 'up' : 'down';
     return `<div class="row"><span class="k">${k}</span><span class="v ${color}">${val}</span></div>`;
   }).join('');
+  $('kvQuote').innerHTML = kvHtml(rows.slice(0, 4));
+  $('kvExtra').innerHTML = kvHtml(rows.slice(4));
 }
 
 function renderAccount() {
@@ -2003,6 +2035,18 @@ function bindEvts() {
     if (G.hover !== -1) { G.hover = -1; const g = G.game; if (g) renderAll(); }
   });
 
+  // 手机端折叠交互（桌面 CSS 藏按钮，不触发）
+  $('tipQ').addEventListener('click', () => document.querySelector('.card.ops').classList.toggle('show-tip'));
+  $('acctQ').addEventListener('click', () => {
+    const c = document.querySelector('.card.acct');
+    c.classList.toggle('show-fold');
+    $('acctQ').textContent = c.classList.contains('show-fold') ? '▴' : '▾';
+  });
+  $('qMore').addEventListener('click', () => {
+    const c = document.querySelector('.card.quote');
+    c.classList.toggle('open-extra');
+    $('qMore').textContent = c.classList.contains('open-extra') ? '收起指标 ▴' : '技术指标 ▾';
+  });
   document.querySelectorAll('.tab').forEach(t => t.addEventListener('click', () => {
     document.querySelectorAll('.tab').forEach(x => x.classList.toggle('active', x === t));
     const v = t.dataset.view;
