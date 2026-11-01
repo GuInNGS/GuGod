@@ -51,7 +51,14 @@
   .prog{margin-left:auto;display:flex;align-items:center;gap:10px;font-size:12px;color:var(--muted)}
   .prog .bar{width:180px;height:6px;border-radius:4px;background:#1b2431;overflow:hidden}
   .prog .bar i{display:block;height:100%;width:0;background:linear-gradient(90deg,#4f8cff,#38bdf8);transition:width .18s}
-  .canvas-wrap{flex:1;min-height:420px;padding:4px 2px 0}
+  .canvas-wrap{position:relative;flex:1;min-height:420px;padding:4px 2px 0;touch-action:manipulation}
+  .zoomer{position:absolute;top:8px;right:8px;z-index:3;display:flex;align-items:center;gap:1px;
+    background:rgba(10,15,24,.78);border:1px solid var(--line);border-radius:8px;padding:2px 3px}
+  .zoomer button{width:22px;height:20px;border:none;border-radius:5px;background:transparent;
+    color:var(--txt);font-size:13px;line-height:1;cursor:pointer;padding:0;font-family:inherit}
+  .zoomer button:hover{background:rgba(255,255,255,.1)}
+  .zoomer span{min-width:26px;text-align:center;font-size:10.5px;color:var(--dim);
+    font-family:ui-monospace,Consolas,monospace;user-select:none}
   canvas{display:block;width:100%;height:100%}
   #chart{height:100%;min-height:380px}
   .legend{display:flex;gap:14px;flex-wrap:wrap;padding:6px 14px 10px;font-size:11px;color:var(--muted)}
@@ -312,7 +319,13 @@
           <div class="bar"><i id="progBar"></i></div>
         </div>
       </div>
-      <div class="canvas-wrap"><canvas id="chart"></canvas></div>
+      <div class="canvas-wrap"><canvas id="chart"></canvas>
+        <div class="zoomer" id="zoomer">
+          <button id="zoomOut" title="放大：少看几根">−</button>
+          <span id="zoomN" title="当前视口K线数">60</span>
+          <button id="zoomIn" title="缩小：多看几根">＋</button>
+        </div>
+      </div>
       <div class="legend">
         <span class="lg"><i class="dot" style="background:var(--ma5)"></i>MA5</span>
         <span class="lg"><i class="dot" style="background:var(--ma10)"></i>MA10</span>
@@ -322,7 +335,7 @@
         <span class="lg"><i class="dot" style="background:var(--ma5)"></i>DIF</span>
         <span class="lg"><i class="dot" style="background:var(--ma10)"></i>DEA</span>
         <span class="lg"><i class="dot" style="background:#ef4444"></i>MACD柱</span>
-        <span class="hint">鼠标移到K线上看当日明细 · 买入后按收盘价成交</span>
+        <span class="hint">滚轮缩放 · 双击复位 · 鼠标移到K线上看当日明细</span>
       </div>
     </section>
 
@@ -510,7 +523,8 @@ const API_HOSTS = [
   'https://proxy.finance.qq.com/ifzqgtimg/appstock/app/fqkline/get',
 ];
 const PRE_BARS = 60;      // 前置K线
-const EXTRA_BARS = 90;    // 阶段续期预留
+const EXTRA_BARS = 90;    // 抽局最低要求：窗口后至少还能再续 90 个交易日
+const MAX_L = 750;          // 单局窗口上限（约3年交易日，防复盘记录撑爆 localStorage）
 const API_TIMEOUT = 9000;
 
 function apiUrl(host, sym, start, end, count) {
@@ -588,28 +602,30 @@ function rowsToBars(rows, sym) {
   out.sort((a, b) => a[0] < b[0] ? -1 : 1);
   return out;
 }
-/** 从整段 bars 里切出 [前置60 + 窗口L + 续期90]，不合格返回 null */
+/** 从整段 bars 里切局：前置60 + 窗口L 起步，数据一直拿到尽头（供长局续期）。
+ *  质检只查 [前置 + L + 90] 这一段（与老口径完全一致），更远的尾巴不预检。 */
 function sliceRound(bars, code, name, T, L) {
   const lim = (code.startsWith('sz30') || code.startsWith('sh688')) ? 0.215 : 0.115;
   let wi = bars.findIndex(b => b[0] >= T);
   if (wi < PRE_BARS) return null;
-  const end = wi + L + EXTRA_BARS;
-  if (end > bars.length) return null;
-  const seg = bars.slice(wi - PRE_BARS, end);
+  const coreEnd = wi + L + EXTRA_BARS;
+  if (coreEnd > bars.length) return null;
+  const seg = bars.slice(wi - PRE_BARS);
+  const core = seg.slice(0, PRE_BARS + L + EXTRA_BARS);
 
-  if (!(seg[PRE_BARS][2] >= 2 && seg[PRE_BARS][2] <= 600)) return null;
-  for (let i = 1; i < seg.length; i++) {
-    if (Math.abs(seg[i][2] / seg[i - 1][2] - 1) > lim) return null;
-    if (Math.abs(seg[i][1] / seg[i - 1][2] - 1) > lim) return null;
+  if (!(core[PRE_BARS][2] >= 2 && core[PRE_BARS][2] <= 600)) return null;
+  for (let i = 1; i < core.length; i++) {
+    if (Math.abs(core[i][2] / core[i - 1][2] - 1) > lim) return null;
+    if (Math.abs(core[i][1] / core[i - 1][2] - 1) > lim) return null;
   }
-  const dts = seg.map(b => Date.parse(b[0]));
+  const dts = core.map(b => Date.parse(b[0]));
   for (let i = 1; i < dts.length; i++) if (dts[i] - dts[i - 1] > 20 * 864e5) return null;
-  const win = seg.slice(PRE_BARS, PRE_BARS + L);
+  const win = core.slice(PRE_BARS, PRE_BARS + L);
   const hi = Math.max(...win.map(b => b[3])), lo = Math.min(...win.map(b => b[4]));
   if (hi / Math.max(lo, 1e-9) - 1 < 0.08) return null;
 
   return {
-    c: code, n: name, L, M: L + EXTRA_BARS, P: PRE_BARS,
+    c: code, n: name, L, M: Math.min(seg.length - PRE_BARS, MAX_L), P: PRE_BARS,
     ix: (code.startsWith('sz30') || code.startsWith('sh688')) ? '创业板指' : '上证指数',
     b: seg,
   };
@@ -659,10 +675,10 @@ async function buildRound(prefLen) {
     const y = randInt(2013, Math.max(2015, now.getFullYear() - 1));
     const T = dateStr(y, randInt(1, 12), randInt(1, 28));
     if (T > addDays(latest, -380)) continue;          // 太靠近今天，后面凑不满续期K线
-    const start = addDays(T, -160), end = addDays(T, 470);
+    const start = addDays(T, -160), end = addDays(T, 760);   // T 后约2年；接口单次上限640根，够切不截头
     const idxName = (stock[0].startsWith('sz30') || stock[0].startsWith('sh688')) ? '创业板指' : '上证指数';
     const [rows, map] = await Promise.all([
-      fetchKline(stock[0], start, end, 500),
+      fetchKline(stock[0], start, end, 640),
       ensureIndex(idxName, start, end),                 // 基准腿并行取，省一个来回
     ]);
     if (!rows) continue;
@@ -838,11 +854,11 @@ function gameAct(g, kind) {
   markEquity(g);                                // 成交日收盘后的权益
   return true;
 }
-/** 阶段末续期：+30 个交易日（有数据才给续） */
+/** 阶段末续期：+30 个交易日；最后一段不足 30 就直接续到数据尽头 */
 function extendStage(g) {
   if (g.done || g.idx < g.lastIdx) return false;
-  if (g.L + 30 > g.maxL) return false;
-  g.L += 30;
+  if (g.L >= g.maxL) return false;
+  g.L = Math.min(g.L + 30, g.maxL);
   g.lastIdx = g.P + g.L - 1;
   g.stage = (g.stage || 1) + 1;
   return true;
@@ -952,8 +968,11 @@ function buildRecord(g) {
     ret: r.ret, bh: r.bh, bench: r.bench, excess: r.excess, bhExcess: r.bhExcess,
     mdd: r.mdd, winRate: r.winRate, holdRatio: r.holdRatio, cash: r.cash,
     base: g.base, equity: g.cash,
-    // 联网版的数据是现拉的，记录必须自带整段K线才能回看
-    round: { c: R.c, n: R.n, L: R.L, M: R.M, P: R.P, ix: R.ix, b: R.b, is: R.is },
+    // 联网版的数据是现拉的，记录必须自带整段K线才能回看（只存玩过的部分，省空间）
+    round: {
+      c: R.c, n: R.n, L: R.L, M: g.lastIdx + 1 - R.P, P: R.P, ix: R.ix,
+      b: R.b.slice(0, g.lastIdx + 1), is: R.is.slice(0, g.lastIdx + 1),
+    },
     trades: g.trades, eq: g.eq.slice(0, g.L),
   };
 }
@@ -986,13 +1005,18 @@ function labelT(R, i, blind) {
   return d < 0 ? 'T' + d : 'T+' + d;
 }
 function renderKline(cv, view) {
-  const { R, idx, trades = [], hover = -1, blind = true, pos = null, anim = null } = view;
+  const { R, idx, trades = [], hover = -1, blind = true, pos = null, anim = null, zoom = 0 } = view;
   const { ctx, W, H } = prepCanvas(cv);
   const bars = R.b, vis = idx + 1;
   const FUT = 8;                                    // 右侧预留“未来”槽位，保证图表始终撑满宽度
-  const slots = vis + FUT;
   const padL = 10, padR = 64, padT = 8, padB = 20, gap = 10;
   const iw = W - padL - padR;
+  // 滚动视口：主图 zoom = 玩家选的档位根数（Infinity=全部）；报告图不传 zoom 走自适应
+  const VIEW_MAX = zoom === Infinity ? vis
+    : zoom > 0 ? Math.min(vis, Math.max(20, Math.round(zoom)))
+    : Math.min(vis, Math.max(100, Math.floor(iw / 3.2)));
+  const i0 = vis - VIEW_MAX;
+  const slots = VIEW_MAX + FUT;
   const bw = iw / slots;
   const bodyW = Math.max(1, Math.min(13, bw * 0.68));
   const avail = H - padT - padB - gap * 2;
@@ -1000,11 +1024,12 @@ function renderKline(cv, view) {
   const pT = padT, pB = pT + ph;
   const vT = pB + gap, vB = vT + vh;
   const mT = vB + gap, mB = mT + mh;
-  GEO = { padL, bw, vis, W, H, pT, pB };
+  GEO = { padL, bw, vis, i0, W, H, pT, pB };
 
   const ind = indicators(R);
+  const xC = i => padL + (i - i0) * bw + bw / 2;    // 视口内索引 → 像素
   let lo = Infinity, hi = -Infinity, maxV = 0, maxT = 0, maxM = 0;
-  for (let i = 0; i < vis; i++) {
+  for (let i = i0; i < vis; i++) {
     lo = Math.min(lo, bars[i][4]); hi = Math.max(hi, bars[i][3]);
     maxV = Math.max(maxV, bars[i][5] || 0);
     maxT = Math.max(maxT, bars[i][7] || 0);
@@ -1015,16 +1040,15 @@ function renderKline(cv, view) {
   const pad = (hi - lo) * 0.07 || (hi || 1) * 0.02;
   lo -= pad; hi += pad;
   const yP = p => pB - (p - lo) / (hi - lo) * ph;
-  const xC = i => padL + i * bw + bw / 2;
   maxV = maxV || 1; maxT = maxT || 1; maxM = maxM || 0.01;
 
   // 未来区域
   ctx.fillStyle = 'rgba(255,255,255,.012)';
-  ctx.fillRect(padL + vis * bw, pT, Math.max(0, iw - vis * bw), mB - pT);
+  ctx.fillRect(padL + (vis - i0) * bw, pT, Math.max(0, iw - (vis - i0) * bw), mB - pT);
   // 当前日高亮
   if (vis > 0) {
     ctx.fillStyle = 'rgba(255,255,255,.03)';
-    ctx.fillRect(padL + (vis - 1) * bw, pT, bw, mB - pT);
+    ctx.fillRect(padL + (vis - 1 - i0) * bw, pT, bw, mB - pT);
   }
   // 价格网格
   ctx.font = '10px ui-monospace, Consolas, monospace';
@@ -1036,15 +1060,25 @@ function renderKline(cv, view) {
     ctx.fillText(fmt(lo + (hi - lo) * g / 4), W - padR + 6, y);
   }
   // 窗口起点分界
-  const xStart = padL + R.P * bw;
-  if (vis >= R.P) {
+  const xStart = padL + (R.P - i0) * bw;
+  if (vis >= R.P && R.P > i0) {
     ctx.strokeStyle = 'rgba(79,140,255,.55)'; ctx.setLineDash([4, 4]);
     ctx.beginPath(); ctx.moveTo(xStart, pT); ctx.lineTo(xStart, mB); ctx.stroke(); ctx.setLineDash([]);
     ctx.fillStyle = 'rgba(79,140,255,.9)'; ctx.textAlign = 'left'; ctx.fillText('开局', xStart + 3, pT + 8);
+  } else if (blind && R.P < i0) {
+    // 开局线已滚出左缘：给个提示，告诉玩家开局在左边
+    ctx.fillStyle = 'rgba(11,17,26,.82)';
+    ctx.fillRect(padL + 2, pT + 4, 54, 15);
+    ctx.strokeStyle = 'rgba(79,140,255,.5)'; ctx.lineWidth = 1;
+    ctx.strokeRect(padL + 2.5, pT + 4.5, 53, 14);
+    ctx.fillStyle = 'rgba(140,180,255,.95)';
+    ctx.font = '10px ui-monospace, Consolas, monospace';
+    ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
+    ctx.fillText('← 开局', padL + 9, pT + 12);
   }
 
   // K线
-  for (let i = 0; i < vis; i++) {
+  for (let i = i0; i < vis; i++) {
     const [d, o, c, h, l] = bars[i];
     let oo = o, cc = c, hh = h, ll = l, alpha = 1;
     if (anim && anim.i === i) {          // 以开盘价为锚展开：涨的从下往上长，跌的从上往下长
@@ -1068,7 +1102,7 @@ function renderKline(cv, view) {
   const drawLine = (arr, color, w) => {
     ctx.strokeStyle = color; ctx.lineWidth = w; ctx.beginPath();
     let started = false;
-    for (let i = 0; i < vis; i++) {
+    for (let i = i0; i < vis; i++) {
       const v = arr[i]; if (v == null) continue;
       const x = xC(i), y = yP(v);
       if (!started) { ctx.moveTo(x, y); started = true; } else ctx.lineTo(x, y);
@@ -1081,17 +1115,17 @@ function renderKline(cv, view) {
 
   // 成交量 + 5日均量
   ctx.strokeStyle = COL.grid; ctx.beginPath(); ctx.moveTo(padL, vB); ctx.lineTo(W - padR, vB); ctx.stroke();
-  for (let i = 0; i < vis; i++) {
+  for (let i = i0; i < vis; i++) {
     const x = xC(i), v = bars[i][5] || 0;
     const hh = v / maxV * (vh - 4) * (anim && anim.i === i ? anim.k : 1);
     ctx.fillStyle = bars[i][2] >= bars[i][1] ? COL.volUp : COL.volDn;
     ctx.fillRect(x - bodyW / 2, vB - hh, bodyW, hh);
   }
   ctx.strokeStyle = COL.turn; ctx.lineWidth = 1; ctx.beginPath();
-  for (let i = 0; i < vis; i++) {
+  for (let i = i0; i < vis; i++) {
     const m = ind.vma5[i]; if (m == null) continue;
     const x = xC(i), y = vB - m / maxV * (vh - 4);
-    if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+    if (i === i0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
   }
   ctx.stroke();
   ctx.fillStyle = COL.dim; ctx.textAlign = 'left';
@@ -1100,7 +1134,7 @@ function renderKline(cv, view) {
   // MACD
   const zero = mB - (mB - mT) * (0 - (-maxM)) / (2 * maxM);
   ctx.strokeStyle = COL.grid; ctx.beginPath(); ctx.moveTo(padL, zero); ctx.lineTo(W - padR, zero); ctx.stroke();
-  for (let i = 0; i < vis; i++) {
+  for (let i = i0; i < vis; i++) {
     const x = xC(i), val = ind.macd[i] || 0;
     const kk = (anim && anim.i === i) ? anim.k : 1;      // MACD 柱也从 0 轴长出来
     const yFull = mB - (val + maxM) / (2 * maxM) * (mB - mT);
@@ -1110,9 +1144,9 @@ function renderKline(cv, view) {
   }
   const lineM = (arr, color) => {
     ctx.strokeStyle = color; ctx.lineWidth = 1.1; ctx.beginPath();
-    for (let i = 0; i < vis; i++) {
+    for (let i = i0; i < vis; i++) {
       const x = xC(i), y = mB - (arr[i] + maxM) / (2 * maxM) * (mB - mT);
-      if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+      if (i === i0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
     }
     ctx.stroke();
   };
@@ -1122,6 +1156,7 @@ function renderKline(cv, view) {
 
   // 买卖点
   const markB = (bi) => {
+    if (bi < i0) return;                             // 已滚出视口
     const x = xC(bi), y = clamp(yP(bars[bi][4]), pT + 16, pB - 17);
     ctx.fillStyle = '#ff4d4f';
     ctx.beginPath(); ctx.moveTo(x, y + 3); ctx.lineTo(x - 4, y + 9); ctx.lineTo(x + 4, y + 9); ctx.closePath(); ctx.fill();
@@ -1129,6 +1164,7 @@ function renderKline(cv, view) {
     ctx.fillText('B', x, y + 10);
   };
   const markS = (si) => {
+    if (si < i0) return;                             // 已滚出视口
     const x = xC(si), y = clamp(yP(bars[si][3]), pT + 16, pB - 17);
     ctx.fillStyle = '#22c55e';
     ctx.beginPath(); ctx.moveTo(x, y - 3); ctx.lineTo(x - 4, y - 9); ctx.lineTo(x + 4, y - 9); ctx.closePath(); ctx.fill();
@@ -1139,7 +1175,7 @@ function renderKline(cv, view) {
   if (pos && pos.bIdx >= 0 && pos.bIdx <= idx) {
     const y0 = yP(pos.price);
     ctx.strokeStyle = 'rgba(239,68,68,.42)'; ctx.lineWidth = 1; ctx.setLineDash([3, 3]);
-    ctx.beginPath(); ctx.moveTo(xC(pos.bIdx), y0); ctx.lineTo(xC(idx), y0); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(Math.max(xC(pos.bIdx), padL), y0); ctx.lineTo(xC(idx), y0); ctx.stroke();
     ctx.setLineDash([]);
     markB(pos.bIdx);
   }
@@ -1153,7 +1189,7 @@ function renderKline(cv, view) {
   ctx.textBaseline = 'top'; ctx.fillStyle = COL.dim;
   const step = Math.max(1, Math.ceil(78 / bw));
   const ticks = [];
-  for (let i = 0; i < vis; i += step) ticks.push(i);
+  for (let i = i0; i < vis; i += step) ticks.push(i);
   if (vis > 0) {
     const lastI = vis - 1;
     if (ticks.length && lastI - ticks[ticks.length - 1] < Math.max(2, step * 0.5)) {
@@ -1171,7 +1207,7 @@ function renderKline(cv, view) {
   });
 
   // 十字光标
-  if (hover >= 0 && hover < vis) {
+  if (hover >= i0 && hover < vis) {
     const x = xC(hover), y = yP(bars[hover][2]);
     ctx.strokeStyle = 'rgba(255,255,255,.28)'; ctx.setLineDash([3, 3]);
     ctx.beginPath(); ctx.moveTo(x, pT); ctx.lineTo(x, mB); ctx.stroke();
@@ -1180,6 +1216,25 @@ function renderKline(cv, view) {
     ctx.fillStyle = COL.dim; ctx.textAlign = 'left';
     ctx.fillText(fmt(bars[hover][2]), W - padR + 6, y);
   }
+}
+
+/** 报告图专用：交易日太多时把日线聚合成周线，防止K线挤成一团。
+ *  只聚合 [0, lastIdx] 玩过的段；返回周线 R + 买卖点索引映射（成交日 → 所属周）。 */
+function toWeekly(R, trades, lastIdx) {
+  const wb = [];                 // 周K：[周首日,开,收,高,低,量Σ,额Σ,换手Σ]
+  const wkIdx = [];              // 每根日K → 周下标
+  let cur = null;
+  for (let i = 0; i <= lastIdx && i < R.b.length; i++) {
+    const bar = R.b[i];
+    const wk = Math.floor((Date.parse(bar[0] + 'T00:00:00Z') - 4 * 864e5) / 6048e5);   // 周一分周
+    if (wk !== cur) { cur = wk; wb.push([bar[0], bar[1], bar[2], bar[3], bar[4], 0, 0, 0]); }
+    const w = wb[wb.length - 1];
+    w[2] = bar[2]; w[3] = Math.max(w[3], bar[3]); w[4] = Math.min(w[4], bar[4]);
+    w[5] += bar[5] || 0; w[6] += bar[6] || 0; w[7] += bar[7] || 0;
+    wkIdx.push(wb.length - 1);
+  }
+  const R2 = { c: R.c, n: R.n, L: R.L, M: R.M, P: wkIdx[R.P] != null ? wkIdx[R.P] : 0, ix: R.ix, b: wb };
+  return { R: R2, trades: trades.map(t => Object.assign({}, t, { bIdx: wkIdx[t.bIdx], sIdx: wkIdx[t.sIdx] })) };
 }
 
 function renderEquity(cv, g, rec, showBench) {
@@ -1481,9 +1536,19 @@ function curBar() {
   return { i, b: g.R.b[i] };
 }
 
+/** 缩放档位：20~360根 + 全部（缩到成线看全历史）；默认60根。
+ *  滚轮上=放大（少看）下=缩小（多看），双击复位60。 */
+const ZOOM_STEPS = [20, 40, 60, 90, 120, 180, 240, 360, Infinity];
+const ZOOM_DEFAULT_I = 2;                       // 档位[2] = 60 根
+function zoomLabel(i) { const z = ZOOM_STEPS[i]; return z === Infinity ? '全部' : String(z); }
+function setZoomIdx(i) {
+  G.zi = Math.min(ZOOM_STEPS.length - 1, Math.max(0, i));
+  $('zoomN').textContent = zoomLabel(G.zi);
+  if (G.game && !G.game.done) renderAll();
+}
 function chartView(g, extra) {
   return Object.assign({
-    R: g.R, idx: g.idx, trades: g.trades, hover: G.hover, blind: true,
+    R: g.R, idx: g.idx, trades: g.trades, hover: G.hover, blind: true, zoom: ZOOM_STEPS[G.zi != null ? G.zi : ZOOM_DEFAULT_I],
     pos: (g.shares > 0 && g.buyIdx >= 0) ? { bIdx: g.buyIdx, price: g.buyPrice } : null,
   }, extra || {});
 }
@@ -1675,7 +1740,7 @@ function showStage() {
   hideSplash();
   const g = G.game;
   const p = pnlOf(g);
-  const canGo = g.L + 30 <= g.maxL;
+  const canGo = g.L < g.maxL;
   $('stageTag').textContent = `第 ${g.stage} 阶段结束 · ${g.L} 个交易日`;
   $('stageTitle').textContent = `${g.L} 天走完了。`;
   $('stageText').textContent = p >= 0.005
@@ -1823,7 +1888,15 @@ function openReport(g, rec, fromHist) {
   $('report').classList.remove('hidden');
   document.body.classList.add('noscroll');
   requestAnimationFrame(() => {
-    renderKline($('repKline'), { R, idx: g.lastIdx, trades, hover: -1, blind: false });
+    // 报告K线：太挤（每根不足~3.2px）就切周线，手机小屏会自动切
+    const cv = $('repKline');
+    const iwR = Math.max(280, cv.getBoundingClientRect().width) - 74;
+    let Rv = R, tv = trades, weekly = false;
+    if (R.b.length + 8 > Math.floor(iwR / 3.2)) {
+      const w = toWeekly(R, trades, g.lastIdx); Rv = w.R; tv = w.trades; weekly = true;
+    }
+    if (weekly) $('repTag').textContent += ' · 周线';
+    renderKline(cv, { R: Rv, idx: Rv.b.length - 1, trades: tv, hover: -1, blind: false });
     renderEquity($('repEq'), g, rec, full);
   });
 }
@@ -1903,12 +1976,22 @@ function bindEvts() {
   $('ask').addEventListener('click', (e) => { if (e.target === $('ask')) askClose(); });
 
   const chart = $('chart');
+  // 缩放：默认60根；滚轮上=放大（少看），滚轮下=缩小（多看），双击=复位
+  const ziNow = () => (G.zi != null ? G.zi : ZOOM_DEFAULT_I);
+  $('zoomOut').addEventListener('click', () => setZoomIdx(ziNow() - 1));
+  $('zoomIn').addEventListener('click', () => setZoomIdx(ziNow() + 1));
+  chart.addEventListener('wheel', (e) => {
+    if (!G.game || G.game.done) return;
+    e.preventDefault();
+    setZoomIdx(ziNow() + (e.deltaY < 0 ? -1 : 1));
+  }, { passive: false });
+  chart.addEventListener('dblclick', () => setZoomIdx(ZOOM_DEFAULT_I));
   const hoverAt = (clientX) => {
     const g = G.game; if (!g) return;
     const rect = chart.getBoundingClientRect();
     const x = clientX - rect.left;
-    let i = Math.floor((x - GEO.padL) / GEO.bw);
-    if (i < 0 || i >= GEO.vis) { if (G.hover !== -1) { G.hover = -1; renderAll(); } return; }
+    let i = (GEO.i0 || 0) + Math.floor((x - GEO.padL) / GEO.bw);
+    if (i < (GEO.i0 || 0) || i >= GEO.vis) { if (G.hover !== -1) { G.hover = -1; renderAll(); } return; }
     if (i !== G.hover) { G.hover = i; renderAll(); }
   };
   chart.addEventListener('mousemove', (e) => hoverAt(e.clientX));
