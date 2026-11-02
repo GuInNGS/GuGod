@@ -73,6 +73,8 @@
   .q-top{display:flex;align-items:baseline;gap:10px;margin-bottom:8px}
   .q-top .big{font-size:26px;font-weight:700;font-family:ui-monospace,Consolas,monospace;letter-spacing:.5px}
   .chg{font-size:13px;font-weight:600}
+  .q-idx{display:flex;justify-content:space-between;align-items:center;margin:-2px 0 8px;padding:4px 8px;
+    border:1px dashed var(--line2);border-radius:7px;font-size:12px;color:var(--muted)}
   .kv{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:5px 10px;margin:0;font-size:12px}
   .kv .row{display:flex;justify-content:space-between;gap:6px;padding:2px 0;border-bottom:1px dashed rgba(255,255,255,.04)}
   .kv .k{color:var(--muted)}
@@ -362,6 +364,9 @@
           <span id="qClose" class="big">—</span>
           <span id="qChg" class="chg">—</span>
         </div>
+        <div class="q-idx" id="qIdxLine" title="只看涨跌幅，不看点位（点位会暴露年代）">
+          <span>当日上证</span><span id="qIdx" class="chg">—</span>
+        </div>
         <div class="kv" id="kvQuote"></div>
         <div class="kv" id="kvExtra"></div>
         <button id="qMore" class="qmore" type="button">技术指标 ▾</button>
@@ -408,7 +413,7 @@
           <thead>
             <tr>
               <th class="l">结算时间</th><th class="l">标的</th><th class="l">区间</th><th>天数</th>
-              <th>策略</th><th>期末权益</th><th>持有</th><th>基准</th><th>超额</th><th>笔数</th><th>胜率</th><th class="l">操作</th>
+              <th>策略</th><th>期末权益</th><th>个股持有</th><th>同期基准</th><th>超额vs个股</th><th>笔数</th><th>胜率</th><th class="l">操作</th>
             </tr>
           </thead>
           <tbody id="histBody"></tbody>
@@ -471,7 +476,7 @@
         <table>
           <thead>
             <tr><th>#</th><th class="l">买入日</th><th>买入价</th><th class="l">卖出日</th><th>卖出价</th>
-              <th>持有</th><th>收益</th><th>同期个股</th><th>同期基准</th><th>超额</th></tr>
+              <th>持有</th><th>收益</th><th>同期个股</th><th>同期基准</th><th>超额vs个股</th></tr>
           </thead>
           <tbody id="repTrades"></tbody>
         </table>
@@ -674,17 +679,19 @@ async function ensureIndex(name, start, end) {
   IDX[name] = { map, min: cur ? cur.min : start, max: end };
   return map;
 }
-function attachIndex(round, map) {
+/** 把指数日收盘按日期对齐到个股K线（缺口前值填充，头部缺失用首个有效值垫底） */
+function attachSeries(round, map, field) {
   let last = null;
-  round.is = round.b.map(b => {
+  round[field] = round.b.map(b => {
     const v = map[b[0]];
     if (v) last = v;
     return last != null ? +last.toFixed(2) : 0;
   });
-  const first = round.is.find(v => v > 0) || 1;
-  for (let i = 0; i < round.is.length; i++) if (!round.is[i]) round.is[i] = first;
+  const first = round[field].find(v => v > 0) || 1;
+  for (let i = 0; i < round[field].length; i++) if (!round[field][i]) round[field][i] = first;
   return round;
 }
+function attachIndex(round, map) { return attachSeries(round, map, 'is'); }
 
 /** 抽一局：随机股票 + 随机起点，最多试 6 次 */
 async function buildRound(prefLen) {
@@ -698,15 +705,18 @@ async function buildRound(prefLen) {
     if (T > addDays(latest, -380)) continue;          // 太靠近今天，后面凑不满续期K线
     const start = addDays(T, -160), end = addDays(T, 760);   // T 后约2年；接口单次上限640根，够切不截头
     const idxName = (stock[0].startsWith('sz30') || stock[0].startsWith('sh688')) ? '创业板指' : '上证指数';
-    const [rows, map] = await Promise.all([
+    const shP = idxName === '上证指数' ? null : ensureIndex('上证指数', start, end);   // 大盘当日涨幅腿（主板局与基准同一条，不另拉）
+    const [rows, map, shMap] = await Promise.all([
       fetchKline(stock[0], start, end, 640),
       ensureIndex(idxName, start, end),                 // 基准腿并行取，省一个来回
+      shP || Promise.resolve(null),
     ]);
     if (!rows) continue;
     const bars = rowsToBars(rows, stock[0]);
     const r = sliceRound(bars, stock[0], stock[1], T, L);
     if (!r) continue;
     if (!map) return null;                            // 指数拿不到就别硬撑
+    if (shMap || idxName === '上证指数') attachSeries(r, shMap || map, 'sh');   // 上证拿不到也别卡住，只是不显示当日涨幅
     return attachIndex(r, map);
   }
   return null;
@@ -899,7 +909,8 @@ function gameSettle(g) {
   const wins = g.trades.filter(t => t.ret > 0).length;
   const holdDays = g.trades.reduce((a, t) => a + t.hold, 0);
   g.result = {
-    ret, bh, bench, excess: ret - bench, bhExcess: bh - bench,
+    // 超额=策略 vs 同期个股持有（比的是"你做T不如拿住吗"）；大盘只作基准展示，另记在 bhExcess
+    ret, bh, bench, excess: ret - bh, bhExcess: bh - bench,
     n: g.trades.length, winRate: g.trades.length ? wins / g.trades.length : 0,
     avgRet: g.trades.length ? g.trades.reduce((a, t) => a + t.ret, 0) / g.trades.length : 0,
     mdd, holdRatio: holdDays / g.L, cash: g.cash,
@@ -1312,7 +1323,7 @@ function renderEquity(cv, g, rec, showBench) {
     { v: strat[n - 1], c: '#ef4444', t: '策略' },
     { v: bh[n - 1], c: '#38bdf8', t: '个股' },
   ];
-  if (showBench) tags.push({ v: bench[n - 1], c: '#64748b', t: '基准' });
+  if (showBench) tags.push({ v: bench[n - 1], c: '#64748b', t: R.ix });
   tags.sort((a, b) => b.v - a.v);
   let lastY = -99;
   ctx.textAlign = 'left';
@@ -1630,6 +1641,12 @@ function renderQuote() {
   $('qChg').textContent = `${arrow(chg)} ${pctS(chg)}  ${(c - prev >= 0 ? '+' : '') + fmt(c - prev)}`;
   $('qChg').className = 'chg ' + cls(chg);
 
+  // 当日大盘（上证）涨幅：只给涨跌幅不给点位——点位会暴露年代，破坏盲做
+  const shChg = (R.sh && i > 0) ? R.sh[i] / R.sh[i - 1] - 1 : null;
+  $('qIdxLine').style.display = R.sh ? '' : 'none';
+  $('qIdx').textContent = shChg == null ? '—' : `${arrow(shChg)} ${pctS(shChg)}`;
+  $('qIdx').className = 'chg' + (shChg == null ? '' : ' ' + cls(shChg));
+
   const vma = ind.vma5[i];
   const vr = (vma && vma > 0) ? v / vma : null;
   const rows = [
@@ -1878,12 +1895,13 @@ function openReport(g, rec, fromHist) {
   $('repAcc').textContent = `账户权益 ¥${money(eqNow)} · 累计 ${(eqNow / INIT_CASH - 1) >= 0 ? '+' : ''}${pctS(eqNow / INIT_CASH - 1)} · 本局起始 ¥${money(baseNow)}`;
   const qpool = r.ret >= 0.005 ? CLOSE_WIN : (r.ret <= -0.005 ? CLOSE_LOSE : CLOSE_FLAT);
   $('repQuip').textContent = qpool[Math.floor(Math.abs(r.ret) * 1000) % qpool.length];
+  const exStock = r.ret - r.bh;                     // 超额收益：策略 vs 同期个股持有，不是跟大盘比
   const cards = [
     { k: '策略收益', v: pctS(r.ret), c: cls(r.ret), s: `期末 ¥${money(rec ? rec.cash : g.cash)}` },
-    { k: '个股持有', v: pctS(r.bh), c: cls(r.bh), s: '首日收盘买入并持有' },
-    { k: '基准收益', v: pctS(r.bench), c: cls(r.bench), s: R.ix, only: true },
-    { k: '超额收益', v: (r.excess >= 0 ? '+' : '') + pctS(r.excess), c: cls(r.excess), s: '策略 − 基准', only: true },
-    { k: '个股超额', v: (r.bhExcess >= 0 ? '+' : '') + pctS(r.bhExcess), c: cls(r.bhExcess), s: '持有 − 基准', only: true },
+    { k: '个股持有', v: pctS(r.bh), c: cls(r.bh), s: '同期买入一直拿着' },
+    { k: `同期基准`, v: pctS(r.bench), c: cls(r.bench), s: R.ix, only: true },
+    { k: '超额收益', v: (exStock >= 0 ? '+' : '') + pctS(exStock), c: cls(exStock), s: '策略 − 个股持有' },   // 不涉大盘，结算当场就给
+    { k: '个股vs大盘', v: (r.bhExcess >= 0 ? '+' : '') + pctS(r.bhExcess), c: cls(r.bhExcess), s: '个股持有 − 基准', only: true },
     { k: '交易 / 胜率', v: `${r.n != null ? r.n : (rec ? rec.trades.length : 0)} 笔`, c: '', s: `胜率 ${pctS(r.winRate != null ? r.winRate : (rec ? rec.winRate : 0), 1)}` },
   ].filter(x => full || !x.only);
   $('repStats').style.gridTemplateColumns = `repeat(${cards.length},minmax(0,1fr))`;
@@ -1891,7 +1909,7 @@ function openReport(g, rec, fromHist) {
     `<div class="stat"><div class="k">${x.k}</div><div class="v ${x.c}">${x.v}</div><div class="s">${x.s}</div></div>`).join('');
 
   $('repTag').textContent = `${R.L} 日 · 佣金万3+印花税万5` + (full ? ` · 基准 ${R.ix}` : '');
-  $('repEqTag').textContent = full ? '策略 / 个股持有 / 基准（起点=100）' : '策略 / 个股持有（起点=100）';
+  $('repEqTag').textContent = full ? `策略 / 个股持有 / 基准·${R.ix}（起点=100）` : '策略 / 个股持有（起点=100）';
   $('repTradesSec').style.display = full ? '' : 'none';
   $('repAgain').style.display = full ? 'none' : '';
   $('repKeyHint').style.display = full ? 'none' : '';
@@ -1899,7 +1917,7 @@ function openReport(g, rec, fromHist) {
 
   const trades = rec ? rec.trades : g.trades;
   const tbody = trades.map((t, i) => {
-    const ex = t.ret - t.bench;
+    const ex = t.ret - t.bh;                       // 超额=这笔操作 vs 同窗口个股持有
     return `<tr>
       <td>${i + 1}</td>
       <td class="l">${t.bDate}</td><td>${fmt(t.bPrice)}</td>
@@ -1948,7 +1966,9 @@ function renderHist() {
   const list = loadRecs();
   refreshHistBadge();
   $('histEmpty').style.display = list.length ? 'none' : 'block';
-  $('histBody').innerHTML = list.map((r, i) => `
+  $('histBody').innerHTML = list.map((r, i) => {
+    const ex = r.ret - r.bh;                       // 超额=策略 vs 同期个股持有（现算，旧记录同口径）
+    return `
     <tr>
       <td class="l">${new Date(r.ts).toLocaleString('zh-CN', { hour12: false })}</td>
       <td class="l">${r.name} <span style="color:var(--dim)">${r.code}</span></td>
@@ -1958,14 +1978,15 @@ function renderHist() {
       <td>${r.equity != null ? '¥' + money(r.equity) : '—'}</td>
       <td class="${cls(r.bh)}">${(r.bh >= 0 ? '+' : '') + pctS(r.bh)}</td>
       <td class="${cls(r.bench)}">${(r.bench >= 0 ? '+' : '') + pctS(r.bench)}</td>
-      <td class="${cls(r.excess)}">${(r.excess >= 0 ? '+' : '') + pctS(r.excess)}</td>
+      <td class="${cls(ex)}">${(ex >= 0 ? '+' : '') + pctS(ex)}</td>
       <td>${r.trades.length}</td>
       <td>${pctS(r.winRate, 0)}</td>
       <td class="l">
         <button class="btn sm" data-open="${i}">查看</button>
         <button class="btn sm" data-del="${i}">删</button>
       </td>
-    </tr>`).join('');
+    </tr>`;
+  }).join('');
 }
 
 function openHistRecord(idx) {
@@ -1983,7 +2004,7 @@ function openHistRecord(idx) {
     trades: rec.trades, eq: rec.eq, done: true, result: null,
   };
   g.result = {
-    ret: rec.ret, bh: rec.bh, bench: rec.bench, excess: rec.excess, bhExcess: rec.bhExcess,
+    ret: rec.ret, bh: rec.bh, bench: rec.bench, excess: rec.ret - rec.bh, bhExcess: rec.bhExcess,
     n: rec.trades.length, winRate: rec.winRate, avgRet: 0, mdd: rec.mdd, holdRatio: rec.holdRatio, cash: rec.cash,
   };
   openReport(g, rec, true);
@@ -2087,7 +2108,7 @@ function bindEvts() {
   $('repAgain').addEventListener('click', () => { hideReport(); newRound(); });
   $('btnCopy').addEventListener('click', async () => {
     const rec = REP.rec; if (!rec) return;
-    const txt = `${rec.name} ${rec.code} ${rec.start}~${rec.end} 策略${pctS(rec.ret)} 持有${pctS(rec.bh)} 基准${pctS(rec.bench)} 超额${pctS(rec.excess)}\n` +
+    const txt = `${rec.name} ${rec.code} ${rec.start}~${rec.end} 策略${pctS(rec.ret)} 持有${pctS(rec.bh)} 基准${pctS(rec.bench)} 超额vs个股${pctS(rec.ret - rec.bh)}\n` +
       rec.trades.map((t, i) => `#${i + 1} ${t.bDate}@${fmt(t.bPrice)} → ${t.sDate}@${fmt(t.sPrice)} ${pctS(t.ret)}`).join('\n');
     try { await navigator.clipboard.writeText(txt); $('repSaved').textContent = '已复制到剪贴板'; }
     catch (e) { alert(txt); }
