@@ -1889,6 +1889,14 @@ function openReport(g, rec, fromHist) {
   const r = rec || g.result;
   const eqNow = rec ? (rec.equity != null ? rec.equity : rec.cash) : g.cash;
   const baseNow = rec ? (rec.base || INIT_CASH) : g.base;
+  // 最大盈利/最大回撤：从本局净值序列现算（旧记录同样适用），峰值从本局起始权益起算
+  let eqPeak = baseNow, mddNow = 0;
+  for (const e of (rec ? rec.eq : g.eq) || []) {
+    if (!isFinite(e)) continue;
+    eqPeak = Math.max(eqPeak, e);
+    mddNow = Math.min(mddNow, e / eqPeak - 1);
+  }
+  const maxG = eqPeak / baseNow - 1;
   $('repAcc').textContent = `账户权益 ¥${money(eqNow)} · 累计 ${(eqNow / INIT_CASH - 1) >= 0 ? '+' : ''}${pctS(eqNow / INIT_CASH - 1)} · 本局起始 ¥${money(baseNow)}`;
   const qpool = r.ret >= 0.005 ? CLOSE_WIN : (r.ret <= -0.005 ? CLOSE_LOSE : CLOSE_FLAT);
   $('repQuip').textContent = qpool[Math.floor(Math.abs(r.ret) * 1000) % qpool.length];
@@ -1899,9 +1907,12 @@ function openReport(g, rec, fromHist) {
     { k: `同期基准`, v: pctS(r.bench), c: cls(r.bench), s: R.ix, only: true },
     { k: '超额收益', v: (exStock >= 0 ? '+' : '') + pctS(exStock), c: cls(exStock), s: '策略 − 个股持有' },   // 不涉大盘，结算当场就给
     { k: '个股vs大盘', v: (r.bhExcess >= 0 ? '+' : '') + pctS(r.bhExcess), c: cls(r.bhExcess), s: '个股持有 − 基准', only: true },
+    { k: '最大盈利', v: (maxG >= 0 ? '+' : '') + pctS(maxG), c: cls(maxG), s: '期间最高权益' },
+    { k: '最大回撤', v: pctS(mddNow), c: cls(mddNow), s: '期间最深回撤' },
     { k: '交易 / 胜率', v: `${r.n != null ? r.n : (rec ? rec.trades.length : 0)} 笔`, c: '', s: `胜率 ${pctS(r.winRate != null ? r.winRate : (rec ? rec.winRate : 0), 1)}` },
   ].filter(x => full || !x.only);
-  $('repStats').style.gridTemplateColumns = `repeat(${cards.length},minmax(0,1fr))`;
+  // 自适应列数：桌面8卡一行，手机自动换行（不再按卡片数硬铺）
+  $('repStats').style.gridTemplateColumns = 'repeat(auto-fit,minmax(min(110px,100%),1fr))';
   $('repStats').innerHTML = cards.map(x =>
     `<div class="stat"><div class="k">${x.k}</div><div class="v ${x.c}">${x.v}</div><div class="s">${x.s}</div></div>`).join('');
 
