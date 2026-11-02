@@ -652,13 +652,13 @@ function sliceRound(bars, code, name, T, L) {
 
   return {
     c: code, n: name, L, M: Math.min(seg.length - PRE_BARS, MAX_L), P: PRE_BARS,
-    ix: (code.startsWith('sz30') || code.startsWith('sh688')) ? '创业板指' : '上证指数',
+    ix: '上证指数',                                  // 基准统一上证（用户1102定），不分板
     b: seg,
   };
 }
 
 /* ---------------- 抽局：随机票 + 随机历史区间 ---------------- */
-const IDX_SYM = { '上证指数': 'sh000001', '创业板指': 'sz399006' };
+const IDX_SYM = { '上证指数': 'sh000001' };          // 基准统一上证
 const IDX = {};                       // name -> {map, min, max}
 function pad2(n) { return (n < 10 ? '0' : '') + n; }
 function dateStr(y, m, d) { return `${y}-${pad2(m)}-${pad2(d)}`; }
@@ -704,19 +704,16 @@ async function buildRound(prefLen) {
     const T = dateStr(y, randInt(1, 12), randInt(1, 28));
     if (T > addDays(latest, -380)) continue;          // 太靠近今天，后面凑不满续期K线
     const start = addDays(T, -160), end = addDays(T, 760);   // T 后约2年；接口单次上限640根，够切不截头
-    const idxName = (stock[0].startsWith('sz30') || stock[0].startsWith('sh688')) ? '创业板指' : '上证指数';
-    const shP = idxName === '上证指数' ? null : ensureIndex('上证指数', start, end);   // 大盘当日涨幅腿（主板局与基准同一条，不另拉）
-    const [rows, map, shMap] = await Promise.all([
+    const [rows, map] = await Promise.all([
       fetchKline(stock[0], start, end, 640),
-      ensureIndex(idxName, start, end),                 // 基准腿并行取，省一个来回
-      shP || Promise.resolve(null),
+      ensureIndex('上证指数', start, end),             // 基准=上证统一口径；同一序列也供当日大盘涨幅
     ]);
     if (!rows) continue;
     const bars = rowsToBars(rows, stock[0]);
     const r = sliceRound(bars, stock[0], stock[1], T, L);
     if (!r) continue;
     if (!map) return null;                            // 指数拿不到就别硬撑
-    if (shMap || idxName === '上证指数') attachSeries(r, shMap || map, 'sh');   // 上证拿不到也别卡住，只是不显示当日涨幅
+    attachSeries(r, map, 'sh');                       // 当日大盘涨幅条
     return attachIndex(r, map);
   }
   return null;
